@@ -42,6 +42,13 @@ select {
   border-radius: 6px;
   max-width: 100%;
 }
+input[type="date"], input[type="text"] {
+  font-size: 13px;
+  padding: 6px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+}
+input[type="text"] { min-width: 180px; }
 .row label.hint { white-space: nowrap; }
 button {
   background: #2563eb;
@@ -102,6 +109,7 @@ pre.sql {
 .conclusion.not_improved { background: #e0e7ff; color: #312e81; }
 .conclusion.inconclusive { background: #fef9c3; color: #713f12; }
 .conclusion.none { background: #f1f5f9; color: #475569; }
+.verify-error { border: 1px solid #fca5a5; background: #fef2f2; color: #991b1b; }
 .ex-table {
   width: 100%;
   border-collapse: collapse;

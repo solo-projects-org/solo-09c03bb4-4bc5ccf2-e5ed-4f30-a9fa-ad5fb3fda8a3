@@ -3,17 +3,56 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>结算 SQL 计划对照台</title>
+  <title>结算关账核验与 SQL 计划对照台</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header>
-  <h1>结算 SQL 计划对照台</h1>
+  <h1>结算关账核验与 SQL 计划对照台</h1>
   <span id="slot-pill" class="pill">…</span>
 </header>
 <main>
   <section class="card">
-    <h2>新建对照批次</h2>
+    <h2>关账核验（按结算日）</h2>
+    <p class="hint">
+      选择结算日后开始核验：在同一个「可重复读 · 只读」快照内检查当天
+      <code>status = 'SETTLED'</code> 的订单号是否重复，并汇总订单数与金额合计。
+      核验期间其他连接可正常补记；核验完成后，<b>任何连接</b>对该日订单的
+      补记/变更都会使结果失效（不再显示为可信），重新核验成功才恢复可信。
+      核验出错时保留上一次成功结果及其实际有效性，并展示错误原因。
+      样表数据覆盖 2026-08-01 ~ 2026-11-13。
+    </p>
+    <div class="row">
+      <label for="verify-date" class="hint">结算日：</label>
+      <input type="date" id="verify-date">
+      <button id="verify-btn">开始核验</button>
+      <span id="verify-msg" class="msg"></span>
+    </div>
+    <div id="verify-result"></div>
+  </section>
+
+  <section class="card">
+    <h2>补记样表数据</h2>
+    <p class="hint">
+      对照/核验运行期间也可正常入库；它们使用同一快照，新补记的行不会进入本批结果。
+      补记会使对应结算日的已核验结果失效，需重新核验。
+      结算日与订单号均可留空（结算日缺省为当天，订单号缺省随机）；
+      重复补记同一订单号可演示重号冲突。
+    </p>
+    <div class="row">
+      <label for="insert-date" class="hint">结算日：</label>
+      <input type="date" id="insert-date">
+      <label for="insert-orderno" class="hint">订单号：</label>
+      <input type="text" id="insert-orderno" placeholder="留空则随机生成" maxlength="64">
+      <button id="insert-btn">向 settlement_orders 补记一行</button>
+    </div>
+    <div class="row">
+      <span id="insert-msg" class="msg"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>新建 SQL 计划对照批次</h2>
     <p class="hint">
       只接受单条只读 SELECT。同一「可重复读 · 只读」事务内按
       <b>默认 → 关闭 NestLoop → 关闭 NestLoop → 默认</b>（第二轮颠倒顺序）各执行一次
@@ -32,17 +71,6 @@
     <div class="row">
       <button id="run-btn">开始对照</button>
       <span id="submit-msg" class="msg"></span>
-    </div>
-  </section>
-
-  <section class="card">
-    <h2>补记样表数据</h2>
-    <p class="hint">
-      对照运行期间也可正常入库；对照事务使用同一快照，新补记的行不会进入本批结果。
-    </p>
-    <div class="row">
-      <button id="insert-btn">向 settlement_orders 补记一行</button>
-      <span id="insert-msg" class="msg"></span>
     </div>
   </section>
 

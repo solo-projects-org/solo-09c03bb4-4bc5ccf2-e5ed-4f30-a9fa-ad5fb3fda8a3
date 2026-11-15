@@ -1,7 +1,10 @@
-# 结算 SQL 计划对照台
+# 结算关账核验与 SQL 计划对照台
 
-迁库后夜间结算 SQL 变慢，用这个小工具在同一份数据上对比 **默认计划** 与
-**抑制嵌套循环（`SET LOCAL enable_nestloop=off`）** 的实际执行效果。
+面向夜班结算数据员与内网工程师的小工具，包含两块能力：
+
+1. **关账核验（按结算日）**：核验指定结算日的订单能否用于下游汇总；
+2. **SQL 计划对照**：迁库后夜间结算 SQL 变慢，在同一份数据上对比
+   **默认计划** 与 **抑制嵌套循环（`SET LOCAL enable_nestloop=off`）** 的实际执行效果。
 
 ## 快速开始
 
@@ -18,7 +21,39 @@ docker compose up --build
 docker compose down -v && docker compose up --build
 ```
 
-## 它怎么对照
+> 注意：变更流水表与触发器由 `db/init.sql` 在初始化时创建。从旧版本升级后，
+> 需要 `docker compose down -v` 重建数据卷才能使用关账核验。
+
+## 关账核验怎么工作
+
+网页选择结算日后点击「开始核验」，服务端开一条**专用连接**，在同一个
+**`REPEATABLE READ, READ ONLY`** 事务里依次执行：
+
+1. 重号检查：`settle_date = 当天 AND status = 'SETTLED'` 按 `order_no` 分组，
+   找出出现次数 > 1 的订单号（明细最多展示 100 组，另给出总组数与涉及行数）；
+2. 汇总：同一条件下的订单数与 `SUM(amount)`；
+3. 变更标记：`settlement_order_mutations` 中该日的流水行数。
+
+三条查询共享**同一事务快照**，扫描期间其他连接可正常补记/变更（不会被阻塞），
+新数据也不会进入本次快照。
+
+**可信判定**（每次读取时实时计算，不是存下来的标志位）：
+
+- `settlement_orders` 上的语句级触发器会把**任何数据库连接**的
+  INSERT/UPDATE/DELETE 涉及的结算日追加到 `settlement_order_mutations`（只增不减）；
+- 核验结果记录快照内可见的变更标记；展示时与库中当前标记比较：
+  - 标记一致且无重号 → **可信**，展示可信订单数与金额合计；
+  - 有重号 → 展示冲突订单号与出现次数，不可用于下游汇总；
+  - 标记不一致 → 核验后该日又有补记/变更（包括扫描期间提交的新订单），
+    旧结果**不得再显示为可信**，仅作参考并提示重新核验；
+- 只有**重新核验成功**（新快照、新标记一致）才恢复可信状态；
+- 核验出错时，本次尝试记为失败，**保留上一次成功结果及其实际有效性**，
+  并展示错误原因。
+
+页面上的「补记样表数据」可指定结算日与订单号（均可留空：结算日缺省当天、
+订单号缺省随机），用于演示补记后结果失效、重复补记同一订单号触发重号冲突。
+
+## SQL 计划对照怎么工作
 
 提交一条只读 SELECT 后，后台会开一条**专用连接**，在**同一个
 `REPEATABLE READ, READ ONLY` 事务**里执行 4 次 `EXPLAIN (ANALYZE, FORMAT JSON)`：
@@ -88,20 +123,23 @@ ORDER BY total_amount DESC;
 
 | 方法 | 路径 | 说明 |
 |-----|------|------|
+| POST | `/api/verifications` | 核验指定结算日（body: `{"settle_date": "YYYY-MM-DD"}`，409=该日正在核验） |
+| GET  | `/api/verifications/{date}` | 该日最近一次成功核验 + 实时可信状态 + 最近错误 |
 | POST | `/api/batches` | 提交对照批次（409=繁忙，400=SQL 校验失败） |
 | GET  | `/api/batches` | 批次列表（不含完整计划 JSON） |
 | GET  | `/api/batches/{id}` | 批次详情（含 4 次计划 JSON 与结构摘要） |
 | POST | `/api/batches/{id}/cancel` | 取消运行中的批次 |
-| POST | `/api/sample-row` | 向 `settlement_orders` 补记一行 |
+| POST | `/api/sample-row` | 向 `settlement_orders` 补记一行（body 可空；可指定 `settle_date`、`order_no`） |
 
 ## 目录结构
 
 ```
 ├── docker-compose.yml
-├── db/init.sql            # 结算样表 + 倾斜数据
+├── db/init.sql            # 结算样表 + 倾斜数据 + 变更流水表与触发器
 └── app/
     ├── Dockerfile
-    ├── main.py            # FastAPI 入口
+    ├── main.py            # FastAPI 入口（核验/对照/补记 API）
+    ├── verify.py          # 关账核验（单事务快照、变更标记、可信判定、内存仓库）
     ├── runner.py          # 批次执行器（单事务 4 次执行、限时、取消、名额管理）
     ├── plans.py           # 计划结构归一化 + 结论判定
     ├── sqlcheck.py        # 只读 SELECT 校验
@@ -110,4 +148,4 @@ ORDER BY total_amount DESC;
 ```
 
 > 说明：该工具面向受信任的内网工程师，输入的 SQL 会被直接执行（只读事务保护），
-> 请勿暴露到公网。批次数据保存在内存中，重启即清空。
+> 请勿暴露到公网。批次与核验数据保存在内存中，重启即清空（订单与变更流水在数据库中）。

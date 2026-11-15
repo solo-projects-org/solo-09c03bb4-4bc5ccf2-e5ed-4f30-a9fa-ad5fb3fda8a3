@@ -30,6 +30,13 @@ document.getElementById('preset').onchange = (e) => {
   sqlInput.value = PRESETS[e.target.value] || '';
 };
 
+// 样表数据覆盖 2026-08-01 ~ 2026-11-13，默认选中有数据的最后一天
+const verifyDateInput = document.getElementById('verify-date');
+const insertDateInput = document.getElementById('insert-date');
+const insertOrderNoInput = document.getElementById('insert-orderno');
+verifyDateInput.value = '2026-11-13';
+insertDateInput.value = verifyDateInput.value;
+
 const expanded = new Set();   // 展开了计划详情的批次 id
 
 const STATUS_TEXT = {
@@ -55,6 +62,107 @@ function escapeHtml(s) {
 }
 function fmtMs(v) { return v == null ? '—' : Number(v).toFixed(1) + ' ms'; }
 function fmtTime(ts) { return ts ? new Date(ts * 1000).toLocaleString() : '—'; }
+
+/* ---------------- 关账核验 ---------------- */
+
+function renderVerifyState(s) {
+  const box = document.getElementById('verify-result');
+  let html = '';
+  if (s.last_error) {
+    html += `<div class="conclusion none verify-error">
+      <b>最近一次核验失败</b>（${fmtTime(s.last_error.at)}）：${escapeHtml(s.last_error.message)}<br>
+      已保留此前成功结果及其实际有效性，请排查后重新核验。
+    </div>`;
+  }
+  if (!s.result) {
+    box.innerHTML = html || '<p class="hint">该结算日尚未核验。</p>';
+    return;
+  }
+  const r = s.result;
+  if (s.trusted) {
+    html += `<div class="conclusion improved">
+      <b>可信，可用于下游汇总</b>：可信订单数 <b>${r.order_cnt}</b> 笔，
+      金额合计 <b>${escapeHtml(r.total_amount)}</b> 元
+    </div>`;
+  } else if (r.duplicate_groups > 0) {
+    const rows = (r.duplicates || []).map(d =>
+      `<tr><td><code>${escapeHtml(d.order_no)}</code></td><td>${d.cnt}</td></tr>`).join('');
+    html += `<div class="conclusion inconclusive">
+      <b>存在重号冲突，不可用于下游汇总</b>：${r.duplicate_groups} 个订单号重复，
+      涉及 ${r.duplicate_rows} 行
+    </div>
+    <table class="ex-table">
+      <thead><tr><th>冲突订单号</th><th>出现次数</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${r.duplicates_truncated ? `<p class="hint">重号过多，仅展示前 ${(r.duplicates || []).length} 组</p>` : ''}`;
+    if (s.stale) {
+      html += `<div class="conclusion none">核验后该日订单又有补记/变更，以上冲突清单可能已过时，请重新核验。</div>`;
+    }
+  } else if (s.stale) {
+    html += `<div class="conclusion none">
+      <b>结果已失效，不得作为可信合计</b>：核验后该日订单有补记/变更
+      （快照标记 ${r.snapshot_marker} → 当前标记 ${s.current_marker}）。<br>
+      旧结果（仅供参考，不可用于下游汇总）：订单数 ${r.order_cnt} 笔，
+      金额合计 ${escapeHtml(r.total_amount)} 元。请重新核验。
+    </div>`;
+  }
+  html += `<p class="hint">核验于 ${fmtTime(r.finished_at)} · 耗时 ${fmtMs(r.duration_ms)}
+    · 快照标记 ${r.snapshot_marker} · 当前标记 ${s.current_marker}</p>`;
+  box.innerHTML = html;
+}
+
+async function refreshVerification() {
+  const d = verifyDateInput.value;
+  if (!d) return;
+  try {
+    const res = await fetch(`/api/verifications/${d}`);
+    if (!res.ok) return;
+    renderVerifyState(await res.json());
+  } catch (e) { /* 忽略瞬时网络错误，下一轮再试 */ }
+}
+
+verifyDateInput.onchange = () => {
+  if (!insertDateInput.value) insertDateInput.value = verifyDateInput.value;
+  refreshVerification();
+};
+
+document.getElementById('verify-btn').onclick = async () => {
+  const msg = document.getElementById('verify-msg');
+  const d = verifyDateInput.value;
+  msg.className = 'msg';
+  if (!d) {
+    msg.textContent = '请先选择结算日';
+    msg.classList.add('err');
+    return;
+  }
+  msg.textContent = '核验中…';
+  try {
+    const res = await fetch('/api/verifications', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settle_date: d }),
+    });
+    if (res.status === 409) {
+      msg.textContent = '该结算日正在核验中，请稍候';
+      msg.classList.add('warn');
+      return;
+    }
+    if (!res.ok) {
+      msg.textContent = '核验请求失败（HTTP ' + res.status + '）';
+      msg.classList.add('err');
+      return;
+    }
+    renderVerifyState(await res.json());
+    msg.textContent = '核验完成';
+    msg.classList.add('ok');
+  } catch (e) {
+    msg.textContent = '网络错误：' + e;
+    msg.classList.add('err');
+  }
+};
+
+/* ---------------- 对照批次 ---------------- */
 
 async function refresh() {
   try {
@@ -221,21 +329,30 @@ document.getElementById('run-btn').onclick = async () => {
 document.getElementById('insert-btn').onclick = async () => {
   const msg = document.getElementById('insert-msg');
   msg.className = 'msg';
+  const payload = {};
+  if (insertDateInput.value) payload.settle_date = insertDateInput.value;
+  if (insertOrderNoInput.value.trim()) payload.order_no = insertOrderNoInput.value.trim();
   try {
-    const res = await fetch('/api/sample-row', { method: 'POST' });
+    const res = await fetch('/api/sample-row', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
     const d = await res.json();
     if (d.ok) {
       msg.textContent = `已补记 ${d.row.order_no}（商户 ${d.row.merchant_id}，金额 ${d.row.amount}，结算日 ${d.row.settle_date}）`;
       msg.classList.add('ok');
     } else {
-      msg.textContent = '写入失败';
+      msg.textContent = '写入失败：' + (d.detail || '');
       msg.classList.add('err');
     }
   } catch (e) {
     msg.textContent = '网络错误：' + e;
     msg.classList.add('err');
   }
+  refreshVerification();
 };
 
 refresh();
-setInterval(refresh, 1500);
+refreshVerification();
+setInterval(() => { refresh(); refreshVerification(); }, 1500);

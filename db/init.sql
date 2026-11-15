@@ -55,5 +55,58 @@ CROSS JOIN LATERAL (SELECT round((1 + random() * 499)::numeric, 2) AS amount) AS
 CREATE INDEX idx_orders_merchant   ON settlement_orders (merchant_id);
 CREATE INDEX idx_orders_settle_date ON settlement_orders (settle_date);
 
+-- 关账核验支持：订单变更流水。
+-- 任何数据库连接对 settlement_orders 的 INSERT/UPDATE/DELETE 都会把涉及的
+-- 结算日追加到本表（只增不减）。核验时在同一快照内读取该日的流水行数作为
+-- 「变更标记」；展示结果时再与库中当前标记比较：不一致即说明核验之后又有
+-- 补记/变更，旧结果不得再显示为可信，必须重新核验。
+-- 注意：流水表与触发器刻意放在上面的批量灌数之后创建，避免 100 万行初始化
+-- 数据经过语句级过渡表带来的额外开销。
+CREATE TABLE settlement_order_mutations (
+    seq         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    settle_date date        NOT NULL,
+    mutated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_mutations_settle_date ON settlement_order_mutations (settle_date);
+
+CREATE OR REPLACE FUNCTION log_settlement_order_mutation() RETURNS trigger AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO settlement_order_mutations (settle_date)
+        SELECT DISTINCT settle_date FROM new_rows;
+    ELSIF TG_OP = 'UPDATE' THEN
+        INSERT INTO settlement_order_mutations (settle_date)
+        SELECT DISTINCT d FROM (
+            SELECT settle_date FROM new_rows
+            UNION
+            SELECT settle_date FROM old_rows
+        ) AS u (d);
+    ELSE  -- DELETE
+        INSERT INTO settlement_order_mutations (settle_date)
+        SELECT DISTINCT settle_date FROM old_rows;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_orders_mut_ins
+    AFTER INSERT ON settlement_orders
+    REFERENCING NEW TABLE AS new_rows
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION log_settlement_order_mutation();
+
+CREATE TRIGGER trg_orders_mut_upd
+    AFTER UPDATE ON settlement_orders
+    REFERENCING NEW TABLE AS new_rows OLD TABLE AS old_rows
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION log_settlement_order_mutation();
+
+CREATE TRIGGER trg_orders_mut_del
+    AFTER DELETE ON settlement_orders
+    REFERENCING OLD TABLE AS old_rows
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION log_settlement_order_mutation();
+
 ANALYZE merchants;
 ANALYZE settlement_orders;
